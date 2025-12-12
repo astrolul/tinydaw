@@ -5,36 +5,26 @@ CHANNEL_VIEW = 1
 CHANNEL_ASSIGN = 2
 
 def main(stdscr):
+    curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
 
     curses.init_pair(1, curses.COLOR_WHITE, -1)
 
     stdscr.bkgd(' ', curses.color_pair(1))
-    stdscr.clear()
 
-    welcome = "welcome to tinydaw"
+    stdscr.clear()
     height, width = stdscr.getmaxyx()
 
-    y = height // 2
-    x = (width // 2) - (len(welcome) // 2)
-
-    stdscr.attron(curses.color_pair(1))
-    stdscr.addstr(y, x, welcome)
-    stdscr.attroff(curses.color_pair(1))
-
-    stdscr.refresh()
-
-    # ---- Draw border ----
+    # ---- Draw border FIRST ----
     stdscr.border()
 
-    # ---- Title at top ----
+    # ---- Bold title centered at top ----
     title = " tinydaw alpha "
     title_x = (width // 2) - (len(title) // 2)
-    stdscr.addstr(0, title_x, title, curses.color_pair(1) | curses.A_BOLD)
+    stdscr.addstr(0, title_x, title, curses.color_pair(1) | curses.A_BOLD | curses.A_ITALIC)
 
-
-    # ---- Center welcome text ----
+    # ---- Centered welcome text (regular) ----
     welcome = "welcome to tinydaw"
     y = height // 2
     x = (width // 2) - (len(welcome) // 2)
