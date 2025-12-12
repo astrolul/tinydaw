@@ -208,36 +208,50 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
         # Calculate Mixer Layout
         # 8 Channels
         # Available width per channel
-        # e.g. width=80 -> 10 chars per channel
         
+        # Cap column width to keep faders reasonably roughly together on wide screens
         col_width = (width - 4) // MAX_CHANNELS
+        if col_width > 14: col_width = 14
+        
         fader_height = height - 8 # Dynamic height, leave room for headers/footers
         if fader_height < 5: fader_height = 5 # Min height
         
-        start_x = 3
+        # Center the entire block
+        total_width = col_width * MAX_CHANNELS
+        start_x = (width - total_width) // 2
         start_y = 4
         
         for i, ch in enumerate(channels):
-            # Column X center
-            x_pos = start_x + (i * col_width)
+            # Column X start
+            col_x = start_x + (i * col_width)
+            
+            # Center content within the column
+            # Content is roughly 3 characters wide (Fader "[=]", Header "CH1")
+            content_offset = (col_width - 3) // 2
+            draw_x = col_x + content_offset
             
             # Highlight header if selected
             header_attr = curses.A_REVERSE if (i == selected_idx) else curses.A_UNDERLINE
             
             # Header: CH Number
-            stdscr.addstr(start_y - 2, x_pos, f"CH{i+1}", header_attr)
+            stdscr.addstr(start_y - 2, draw_x, f"CH{i+1}", header_attr)
             
             # Subheader: Key
-            stdscr.addstr(start_y - 1, x_pos, f"[{ch.assigned_char}]", curses.color_pair(1))
+            stdscr.addstr(start_y - 1, draw_x, f"[{ch.assigned_char}]", curses.color_pair(1))
             
             # Draw Fader
-            draw_fader(stdscr, x_pos, start_y, fader_height, ch.volume, i == selected_idx)
+            draw_fader(stdscr, draw_x, start_y, fader_height, ch.volume, i == selected_idx)
             
             # Footer: Filename (truncated)
             name = ch.name
+            # Center text or left align within column?
+            # Truncate to col_width to prevent overlap
             if len(name) > col_width - 1:
-                name = name[:col_width-1]
-            stdscr.addstr(start_y + fader_height + 1, x_pos, name, curses.A_DIM)
+                name = name[:col_width - 1]
+            
+            # Center filename visual
+            name_x = col_x + max(0, (col_width - len(name)) // 2)
+            stdscr.addstr(start_y + fader_height + 1, name_x, name, curses.A_DIM)
 
     elif mode == Mode.CHANNEL_ASSIGN:
         stdscr.addstr(1, 2, "ASSIGN MODE - Sel. Channel, (F)ile, (K)ey, (T)rigger", curses.A_BOLD)
