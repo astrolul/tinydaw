@@ -2,6 +2,7 @@ import curses
 import os
 import time
 import logging
+import random
 from curses import wrapper
 from enum import Enum, auto
 
@@ -22,7 +23,8 @@ MAX_CHANNELS = 8
 GATE_THRESHOLD = 0.5  # Seconds without input to consider key released
 
 class Mode(Enum):
-    CHANNEL_VIEW = auto()
+    VIEW_MIXER = auto()
+    VIEW_METERS = auto()
     CHANNEL_ASSIGN = auto()
 
 class TriggerMode(Enum):
@@ -44,9 +46,11 @@ class Channel:
         self.trigger_mode = TriggerMode.ONESHOT
         self.volume = 1.0
         
-        # State for Gate mode
+        # State
         self.last_triggered_time = 0.0
         self.is_gated_playing = False
+        self.playing_channels = [] # Track pygame channels for visualization
+        self.vu_level = 0.0 # 0.0 to 1.0
 
     def assign_file(self, path):
         if not path:
@@ -54,11 +58,10 @@ class Channel:
         if not os.path.exists(path):
             return False, "File not found"
         
-        # Explicit check for pygame and AUDIO_ENABLED to satisfy linters
         if AUDIO_ENABLED and pygame is not None:
             try:
                 self.sound = pygame.mixer.Sound(path)
-                self.sound.set_volume(self.volume) # Ensure volume is up
+                self.sound.set_volume(self.volume)
                 logging.info(f"Loaded sound for Channel {self.index}: {path}")
             except Exception as e:
                 logging.error(f"Error loading sound: {e}")
@@ -77,11 +80,9 @@ class Channel:
         logging.info(f"Channel {self.index} assigned key {key} ({self.assigned_char})")
 
     def toggle_mode(self):
-        """Cycles through trigger modes."""
-        # Reset gate state to prevent persistence bugs when switching back to GATE
         if self.is_gated_playing:
             self.is_gated_playing = False
-            # self.sound.stop() # Optional safety
+            # self.sound.stop()
 
         modes = list(TriggerMode)
         current_idx = modes.index(self.trigger_mode)
@@ -97,43 +98,67 @@ class Channel:
         logging.debug(f"Channel {self.index} volume: {self.volume:.2f}")
 
     def trigger(self):
-        """Called when the key is pressed (or held)."""
         if not self.sound:
             return
 
         now = time.time()
         logging.debug(f"Triggering Channel {self.index} in {self.trigger_mode}")
 
+        ch = None
         if self.trigger_mode == TriggerMode.ONESHOT:
-            # Standard polyphonic playback
             ch = self.sound.play()
-            if ch is None:
-                logging.warning(f"Channel {self.index}: No open mixer channels to play sound!")
         
         elif self.trigger_mode == TriggerMode.RETRIGGER:
-            # Monophonic playback (restart)
             self.sound.stop()
-            self.sound.play()
+            ch = self.sound.play()
 
         elif self.trigger_mode == TriggerMode.GATE:
             self.last_triggered_time = now
             if not self.is_gated_playing:
-                # Start playing
-                logging.debug("Gate Start")
                 self.sound.play() 
                 self.is_gated_playing = True
+                # Capturing the channel for gate is harder as play() is called once
+                # But we can approximate visualizer for gate easily.
 
-    def update_gate(self):
-        """Called periodically to check gate status."""
+        if ch:
+            self.playing_channels.append(ch)
+
+    def update(self):
+        """Update state, gate logic, and visuals."""
+        # 1. Gate Logic
         if self.trigger_mode == TriggerMode.GATE and self.is_gated_playing:
             if time.time() - self.last_triggered_time > GATE_THRESHOLD:
                 if self.sound:
-                    self.sound.stop() # Use stop instead of fadeout to avoid potential volume persistence bugs
+                    self.sound.stop()
                 self.is_gated_playing = False
                 logging.debug(f"Channel {self.index} Gate Stop")
 
+        # 2. Start Visualizer Logic
+        is_playing = False
+        
+        if self.trigger_mode == TriggerMode.GATE:
+            is_playing = self.is_gated_playing
+        else:
+            # Clean up finished channels
+            self.playing_channels = [ch for ch in self.playing_channels if ch.get_busy()]
+            if self.playing_channels:
+                is_playing = True
+
+        target_level = self.volume if is_playing else 0.0
+        if is_playing:
+            # Add some jitter to look like a real meter
+            jitter = random.uniform(0.9, 1.0)
+            target_level *= jitter
+        
+        # Smooth follow
+        if target_level > self.vu_level:
+            self.vu_level = 0.5 * target_level + 0.5 * self.vu_level # Attack fast
+        else:
+            self.vu_level = 0.1 * target_level + 0.9 * self.vu_level # Decay slow
+            
+        if self.vu_level < 0.01: self.vu_level = 0.0
+
 def get_text_input(stdscr, y, x, prompt_text, width=40):
-    """Simple text input helper."""
     curses.echo()
     curses.curs_set(1)
     stdscr.addstr(y, x, prompt_text)
@@ -147,41 +172,19 @@ def get_text_input(stdscr, y, x, prompt_text, width=40):
     curses.curs_set(0)
     return input_bytes.decode('utf-8').strip()
 
-def draw_fader(stdscr, x, y_start, height, value, is_selected):
-    """Draws a vertical ASCII fader."""
-    # Scale value (0.0-1.0) to height
-    # Handle position from bottom (0 to height-1)
-    handle_pos = int(value * (height - 1))
-    
-    # Draw track
+def draw_vertical_bar(stdscr, x, y_start, height, value, char_fill, char_empty, color_pair):
+    """Generic vertical bar drawer"""
+    fill_height = int(value * height)
     for i in range(height):
-        y = y_start + (height - 1) - i # Draw from bottom up
-        char = '|'
-        
-        if i == handle_pos:
-            char = '[#]' if is_selected else '[=]'
-        elif i < handle_pos:
-            char = ' | '
+        y = y_start + (height - 1) - i
+        if i < fill_height:
+            try:
+                stdscr.addstr(y, x, char_fill, color_pair)
+            except curses.error: pass
         else:
-            char = ' | ' # Above handle
-            
-        try:
-            # Add some color to fader
-            attr = curses.A_REVERSE if (i == handle_pos and is_selected) else curses.color_pair(1)
-            # Center the char in a 3-wide column
-            if char.startswith('['): # handle
-                stdscr.addstr(y, x, char, attr)
-            else:
-                stdscr.addstr(y, x, char, curses.color_pair(1) | curses.A_DIM)
-        except curses.error:
-            pass
-            
-    # Draw Value below
-    try:
-        val_str = f"{int(value*100):3}"
-        stdscr.addstr(y_start + height, x, val_str, curses.color_pair(1))
-    except curses.error:
-        pass
+            try:
+                stdscr.addstr(y, x, char_empty, curses.color_pair(1) | curses.A_DIM)
+            except curses.error: pass
 
 def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
     stdscr.erase()
@@ -202,59 +205,71 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
 
     content_start_y = 2
     
-    if mode == Mode.CHANNEL_VIEW:
-        stdscr.addstr(1, 2, "MIXER VIEW - Press keys to play, Arrow Keys to Mix", curses.A_BOLD)
-        
-        # Calculate Mixer Layout
-        # 8 Channels
-        # Available width per channel
-        
-        # Cap column width to keep faders reasonably roughly together on wide screens
-        col_width = (width - 4) // MAX_CHANNELS
-        if col_width > 14: col_width = 14
-        
-        fader_height = height - 8 # Dynamic height, leave room for headers/footers
-        if fader_height < 5: fader_height = 5 # Min height
-        
-        # Center the entire block
-        total_width = col_width * MAX_CHANNELS
-        start_x = (width - total_width) // 2
-        start_y = 4
+    # Common Column Layout Calculation
+    col_width = (width - 4) // MAX_CHANNELS
+    if col_width > 14: col_width = 14
+    total_width = col_width * MAX_CHANNELS
+    start_x = (width - total_width) // 2
+    bar_height = height - 10
+    if bar_height < 5: bar_height = 5
+    start_y = 4
+
+    if mode == Mode.VIEW_MIXER:
+        stdscr.addstr(1, 2, "MIXER - Faders (Vol)", curses.A_BOLD)
         
         for i, ch in enumerate(channels):
-            # Column X start
             col_x = start_x + (i * col_width)
-            
-            # Center content within the column
-            # Content is roughly 3 characters wide (Fader "[=]", Header "CH1")
             content_offset = (col_width - 3) // 2
             draw_x = col_x + content_offset
             
-            # Highlight header if selected
             header_attr = curses.A_REVERSE if (i == selected_idx) else curses.A_UNDERLINE
-            
-            # Header: CH Number
             stdscr.addstr(start_y - 2, draw_x, f"CH{i+1}", header_attr)
-            
-            # Subheader: Key
             stdscr.addstr(start_y - 1, draw_x, f"[{ch.assigned_char}]", curses.color_pair(1))
             
-            # Draw Fader
-            draw_fader(stdscr, draw_x, start_y, fader_height, ch.volume, i == selected_idx)
-            
-            # Footer: Filename (truncated)
+            # Fader Logic
+            handle_pos = int(ch.volume * (bar_height - 1))
+            for h in range(bar_height):
+                y = start_y + (bar_height - 1) - h
+                char = ' | '
+                attr = curses.color_pair(1) | curses.A_DIM
+                if h == handle_pos:
+                    char = '[#]' if i == selected_idx else '[=]'
+                    attr = curses.A_REVERSE if i == selected_idx else curses.color_pair(1)
+                elif h < handle_pos:
+                    char = ' | '
+                
+                try: 
+                    stdscr.addstr(y, draw_x, char, attr)
+                except: pass
+
             name = ch.name
-            # Center text or left align within column?
-            # Truncate to col_width to prevent overlap
-            if len(name) > col_width - 1:
-                name = name[:col_width - 1]
-            
-            # Center filename visual
+            if len(name) > col_width - 1: name = name[:col_width - 1]
             name_x = col_x + max(0, (col_width - len(name)) // 2)
-            stdscr.addstr(start_y + fader_height + 1, name_x, name, curses.A_DIM)
+            stdscr.addstr(start_y + bar_height + 1, name_x, name, curses.A_DIM)
+
+    elif mode == Mode.VIEW_METERS:
+        stdscr.addstr(1, 2, "METERS - dB Levels (Visual)", curses.A_BOLD)
+
+        for i, ch in enumerate(channels):
+            col_x = start_x + (i * col_width)
+            content_offset = (col_width - 3) // 2
+            draw_x = col_x + content_offset
+            
+            # Header
+            stdscr.addstr(start_y - 2, draw_x, f"CH{i+1}", curses.A_UNDERLINE)
+            
+            # Meter Logic
+            # Use ASCII blocks
+            draw_vertical_bar(stdscr, draw_x, start_y, bar_height, ch.vu_level, " █ ", " ░ ", curses.color_pair(2))
+
+            # Value label
+            try:
+                db_str = f"{int(ch.vu_level * 100)}%"
+                stdscr.addstr(start_y + bar_height + 1, draw_x, db_str, curses.color_pair(1))
+            except: pass
 
     elif mode == Mode.CHANNEL_ASSIGN:
-        stdscr.addstr(1, 2, "ASSIGN MODE - Sel. Channel, (F)ile, (K)ey, (T)rigger", curses.A_BOLD)
+        stdscr.addstr(1, 2, "ASSIGN - Setup", curses.A_BOLD)
         
         for i, ch in enumerate(channels):
             y_pos = content_start_y + i
@@ -262,108 +277,100 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
             
             prefix = "> " if i == selected_idx else "  "
             style = curses.A_REVERSE if i == selected_idx else curses.A_NORMAL
-            
-            # Display full info
-            line = f"{prefix}CH {i+1}: Key=[{ch.assigned_char}] Vol={int(ch.volume*100)}% Mode={ch.trigger_mode.name} File={ch.name}"
-            # Truncate content for display
-            if len(line) > width - 4:
-                line = line[:width-4] + "..."
-            
+            line = f"{prefix}CH{i+1}: [{ch.assigned_char}] Vol={int(ch.volume*100)}% {ch.trigger_mode.name} {ch.name}"
+            if len(line) > width - 4: line = line[:width-4] + "..."
             stdscr.addstr(y_pos, 4, line, style)
 
-    # Message/Status Bar
+    # Message
     if message:
         try:
             stdscr.addstr(height-3, 2, f"Use: {message}", curses.color_pair(2))
-        except curses.error:
-            pass
+        except curses.error: pass
 
-    # Instructions
+    # Footer Instructions
     instr = ""
-    if mode == Mode.CHANNEL_VIEW:
-         instr = "[Arrow Keys: Mix] [F2: Assign] [Q: Quit]"
+    if mode == Mode.VIEW_MIXER:
+         instr = "[Arrow Keys: Mix] [F2: Meters] [F3: Assign] [Q: Quit]"
+    elif mode == Mode.VIEW_METERS:
+         instr = "[F1: Mixer] [F3: Assign] [Q: Quit]"
     elif mode == Mode.CHANNEL_ASSIGN:
         instr = "[Up/Down: Nav] [F: File] [K: Key] [T: Mode] [F1: Mixer]"
     
     try:
         stdscr.addstr(height-2, 2, instr[:width-3], curses.color_pair(1))
-    except curses.error:
-        pass
+    except curses.error: pass
 
     stdscr.refresh()
 
 def main(stdscr):
     logging.info("Starting tinydaw")
     
-    # Setup Audio
     if AUDIO_ENABLED and pygame is not None:
         try:
-            # Pre-init to ensure standard audio settings
             pygame.mixer.pre_init(44100, -16, 2, 2048)
             pygame.mixer.init()
-            pygame.mixer.set_num_channels(32) # Increased from MAX*2 to 32 to ensure plenty of polyphony
+            pygame.mixer.set_num_channels(32)
             logging.info("Audio initialized")
         except Exception as e:
             logging.error(f"Audio init failed: {e}")
             pass
 
-    # Setup Curses
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_WHITE, -1)
-    curses.init_pair(2, curses.COLOR_YELLOW, -1) 
+    curses.init_pair(2, curses.COLOR_GREEN, -1) # Green for meters/messages
     stdscr.bkgd(' ', curses.color_pair(1))
-    
     stdscr.nodelay(True)
     
-    # App State
-    current_mode = Mode.CHANNEL_VIEW
+    current_mode = Mode.VIEW_MIXER
     channels = [Channel(i) for i in range(MAX_CHANNELS)]
-    # Use separate selection indices for View and Assign modes? 
-    # Or shared? Shared feels natural.
-    selected_idx = 0 
+    selected_idx = 0
     status_msg = ""
 
     draw_interface(stdscr, current_mode, channels, selected_idx, status_msg)
     
     while True:
         try:
-            time.sleep(0.01)
+            time.sleep(0.01) # 100 FPS loop roughly
             key = stdscr.getch()
         except KeyboardInterrupt:
-            logging.info("KeyboardInterrupt")
             break
 
         should_redraw = False
         
-        # Handle Gate Maintenance every loop
+        # Update channels (Gate + Visuals)
         for ch in channels:
-            ch.update_gate()
+            ch.update()
+        
+        # Force redraw in metering mode to animate
+        if current_mode == Mode.VIEW_METERS:
+            should_redraw = True
 
-        # Input Handling
         if key != -1:
             status_msg = "" 
 
-            # Global Keys
+            # Mode Switching
             if key == curses.KEY_F1:
-                current_mode = Mode.CHANNEL_VIEW
+                current_mode = Mode.VIEW_MIXER
                 should_redraw = True
             elif key == curses.KEY_F2:
+                current_mode = Mode.VIEW_METERS
+                should_redraw = True
+            elif key == curses.KEY_F3:
                 current_mode = Mode.CHANNEL_ASSIGN
                 should_redraw = True
             elif key in (ord('q'), ord('Q')):
                 break
             
-            # Mode Specific Input
-            if current_mode == Mode.CHANNEL_VIEW:
-                # Triggers from keys
+            # Common Triggering
+            if current_mode in (Mode.VIEW_MIXER, Mode.VIEW_METERS):
                 for ch in channels:
                     if ch.assigned_key == key:
                         ch.trigger()
-                        # Redraw not strictly needed for audio, but maybe visuals later
-                
-                # Mixer Navigation
+            
+            # Mixer Controls
+            if current_mode == Mode.VIEW_MIXER:
                 if key == curses.KEY_LEFT:
                     selected_idx = max(0, selected_idx - 1)
                     should_redraw = True
@@ -371,12 +378,13 @@ def main(stdscr):
                     selected_idx = min(MAX_CHANNELS - 1, selected_idx + 1)
                     should_redraw = True
                 elif key == curses.KEY_UP:
-                    channels[selected_idx].adjust_volume(0.05) # +5%
+                    channels[selected_idx].adjust_volume(0.05)
                     should_redraw = True
                 elif key == curses.KEY_DOWN:
-                    channels[selected_idx].adjust_volume(-0.05) # -5%
+                    channels[selected_idx].adjust_volume(-0.05)
                     should_redraw = True
 
+            # Assign Controls
             elif current_mode == Mode.CHANNEL_ASSIGN:
                 if key == curses.KEY_UP:
                     selected_idx = max(0, selected_idx - 1)
@@ -384,34 +392,27 @@ def main(stdscr):
                 elif key == curses.KEY_DOWN:
                     selected_idx = min(MAX_CHANNELS - 1, selected_idx + 1)
                     should_redraw = True
-                
-                # Assign File
                 elif key in (ord('f'), ord('F')):
                     path = get_text_input(stdscr, stdscr.getmaxyx()[0]-3, 2, "Path: ")
                     if path:
                         success, msg = channels[selected_idx].assign_file(path)
                         status_msg = msg
                     should_redraw = True
-
-                # Assign Key
                 elif key in (ord('k'), ord('K')):
                     status_msg = "Press a key to assign..."
                     stdscr.nodelay(False) 
                     draw_interface(stdscr, current_mode, channels, selected_idx, status_msg)
                     new_key = stdscr.getch()
                     stdscr.nodelay(True) 
-                    
-                    if new_key not in (curses.KEY_F1, curses.KEY_F2, 27): 
+                    if new_key not in (curses.KEY_F1, curses.KEY_F2, curses.KEY_F3, 27): 
                         channels[selected_idx].assign_key(new_key)
-                        status_msg = f"Key assigned to {channels[selected_idx].assigned_char}"
+                        status_msg = f"Key assigned"
                     else:
                         status_msg = "Cancelled"
                     should_redraw = True
-                
-                # Toggle Trigger Mode
                 elif key in (ord('t'), ord('T')):
                     new_mode = channels[selected_idx].toggle_mode()
-                    status_msg = f"Mode set to {new_mode.name}"
+                    status_msg = f"Mode: {new_mode.name}"
                     should_redraw = True
 
         if should_redraw:
