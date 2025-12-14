@@ -172,18 +172,29 @@ def get_text_input(stdscr, y, x, prompt_text, width=40):
     curses.curs_set(0)
     return input_bytes.decode('utf-8').strip()
 
-def draw_vertical_bar(stdscr, x, y_start, height, value, char_fill, char_empty, color_pair):
-    """Generic vertical bar drawer"""
+def draw_vertical_bar(stdscr, x, y_start, height, value, char_fill, char_empty, color_pair=None):
+    """Generic vertical bar drawer with gradient support"""
     fill_height = int(value * height)
     for i in range(height):
         y = y_start + (height - 1) - i
+        
+        # Color Logic (Gradient)
+        # Low (bottom) = Green, Mid = Yellow, High = Red
+        pct = i / height
+        if pct < 0.6:
+            color = curses.color_pair(2) # Green
+        elif pct < 0.85:
+            color = curses.color_pair(3) # Yellow
+        else:
+            color = curses.color_pair(4) # Red
+            
         if i < fill_height:
             try:
-                stdscr.addstr(y, x, char_fill, color_pair)
+                stdscr.addstr(y, x, char_fill, color)
             except curses.error: pass
         else:
             try:
-                stdscr.addstr(y, x, char_empty, curses.color_pair(1) | curses.A_DIM)
+                stdscr.addstr(y, x, char_empty, curses.color_pair(7) | curses.A_DIM)
             except curses.error: pass
 
 def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
@@ -191,17 +202,24 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
     height, width = stdscr.getmaxyx()
 
     # Border
+    stdscr.attron(curses.color_pair(7))
     stdscr.border()
+    stdscr.attroff(curses.color_pair(7))
 
     # Title
     title = " tinydaw alpha "
     if AUDIO_ENABLED:
-        title += "(Audio: ON) "
+        status_text = "(Audio: ON) "
+        status_color = curses.color_pair(2)
     else:
-        title += "(Audio: OFF) "
+        status_text = "(Audio: OFF) "
+        status_color = curses.color_pair(4)
 
-    if len(title) < width:
-        stdscr.addstr(0, (width//2) - (len(title)//2), title, curses.color_pair(1) | curses.A_BOLD)
+    full_title = title + status_text
+    if len(full_title) < width:
+        start_x = (width//2) - (len(full_title)//2)
+        stdscr.addstr(0, start_x, title, curses.color_pair(6) | curses.A_BOLD)
+        stdscr.addstr(0, start_x + len(title), status_text, status_color | curses.A_BOLD)
 
     content_start_y = 2
     
@@ -215,28 +233,32 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
     start_y = 4
 
     if mode == Mode.VIEW_MIXER:
-        stdscr.addstr(1, 2, "MIXER - Faders (Vol)", curses.A_BOLD)
+        stdscr.addstr(1, 2, "MIXER - Faders (Vol)", curses.color_pair(5) | curses.A_BOLD)
         
         for i, ch in enumerate(channels):
             col_x = start_x + (i * col_width)
             content_offset = (col_width - 3) // 2
             draw_x = col_x + content_offset
             
-            header_attr = curses.A_REVERSE if (i == selected_idx) else curses.A_UNDERLINE
+            # Header
+            is_sel = (i == selected_idx)
+            header_attr = (curses.color_pair(3) | curses.A_REVERSE) if is_sel else (curses.color_pair(5) | curses.A_BOLD)
             stdscr.addstr(start_y - 2, draw_x, f"CH{i+1}", header_attr)
-            stdscr.addstr(start_y - 1, draw_x, f"[{ch.assigned_char}]", curses.color_pair(1))
+            stdscr.addstr(start_y - 1, draw_x, f"[{ch.assigned_char}]", curses.color_pair(6))
             
             # Fader Logic
             handle_pos = int(ch.volume * (bar_height - 1))
             for h in range(bar_height):
                 y = start_y + (bar_height - 1) - h
                 char = ' | '
-                attr = curses.color_pair(1) | curses.A_DIM
+                attr = curses.color_pair(7) | curses.A_DIM # Track color
+                
                 if h == handle_pos:
-                    char = '[#]' if i == selected_idx else '[=]'
-                    attr = curses.A_REVERSE if i == selected_idx else curses.color_pair(1)
+                    char = '[#]' if is_sel else '[=]'
+                    attr = (curses.color_pair(3) | curses.A_REVERSE) if is_sel else (curses.color_pair(3) | curses.A_BOLD)
                 elif h < handle_pos:
                     char = ' | '
+                    attr = curses.color_pair(7)
                 
                 try: 
                     stdscr.addstr(y, draw_x, char, attr)
@@ -245,10 +267,10 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
             name = ch.name
             if len(name) > col_width - 1: name = name[:col_width - 1]
             name_x = col_x + max(0, (col_width - len(name)) // 2)
-            stdscr.addstr(start_y + bar_height + 1, name_x, name, curses.A_DIM)
+            stdscr.addstr(start_y + bar_height + 1, name_x, name, curses.color_pair(5))
 
     elif mode == Mode.VIEW_METERS:
-        stdscr.addstr(1, 2, "METERS - dB Levels (Visual)", curses.A_BOLD)
+        stdscr.addstr(1, 2, "METERS - dB Levels (Visual)", curses.color_pair(5) | curses.A_BOLD)
 
         for i, ch in enumerate(channels):
             col_x = start_x + (i * col_width)
@@ -256,35 +278,46 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
             draw_x = col_x + content_offset
             
             # Header
-            stdscr.addstr(start_y - 2, draw_x, f"CH{i+1}", curses.A_UNDERLINE)
+            stdscr.addstr(start_y - 2, draw_x, f"CH{i+1}", curses.color_pair(5) | curses.A_UNDERLINE)
             
             # Meter Logic
-            # Use ASCII blocks
-            draw_vertical_bar(stdscr, draw_x, start_y, bar_height, ch.vu_level, " █ ", " ░ ", curses.color_pair(2))
+            # Use ASCII blocks with Gradient (handled in draw_vertical_bar)
+            draw_vertical_bar(stdscr, draw_x, start_y, bar_height, ch.vu_level, " █ ", " ░ ", None)
 
             # Value label
             try:
                 db_str = f"{int(ch.vu_level * 100)}%"
-                stdscr.addstr(start_y + bar_height + 1, draw_x, db_str, curses.color_pair(1))
+                color = curses.color_pair(2)
+                if ch.vu_level > 0.8: color = curses.color_pair(4)
+                elif ch.vu_level > 0.6: color = curses.color_pair(3)
+                stdscr.addstr(start_y + bar_height + 1, draw_x, db_str, color)
             except: pass
 
     elif mode == Mode.CHANNEL_ASSIGN:
-        stdscr.addstr(1, 2, "ASSIGN - Setup", curses.A_BOLD)
+        stdscr.addstr(1, 2, "ASSIGN - Setup", curses.color_pair(5) | curses.A_BOLD)
         
         for i, ch in enumerate(channels):
             y_pos = content_start_y + i
             if y_pos >= height - 2: break
             
             prefix = "> " if i == selected_idx else "  "
-            style = curses.A_REVERSE if i == selected_idx else curses.A_NORMAL
+            
+            if i == selected_idx:
+                style = curses.color_pair(3) | curses.A_REVERSE | curses.A_BOLD
+            else:
+                style = curses.color_pair(5)
+            
             line = f"{prefix}CH{i+1}: [{ch.assigned_char}] Vol={int(ch.volume*100)}% {ch.trigger_mode.name} {ch.name}"
             if len(line) > width - 4: line = line[:width-4] + "..."
-            stdscr.addstr(y_pos, 4, line, style)
+            
+            try:
+                stdscr.addstr(y_pos, 4, line, style)
+            except: pass
 
     # Message
     if message:
         try:
-            stdscr.addstr(height-3, 2, f"Use: {message}", curses.color_pair(2))
+            stdscr.addstr(height-3, 2, f"Use: {message}", curses.color_pair(2) | curses.A_BOLD)
         except curses.error: pass
 
     # Footer Instructions
@@ -297,7 +330,7 @@ def draw_interface(stdscr, mode: Mode, channels, selected_idx, message=""):
         instr = "[Up/Down: Nav] [F: File] [K: Key] [T: Mode] [F1: Mixer]"
     
     try:
-        stdscr.addstr(height-2, 2, instr[:width-3], curses.color_pair(1))
+        stdscr.addstr(height-2, 2, instr[:width-3], curses.color_pair(7) | curses.A_BOLD)
     except curses.error: pass
 
     stdscr.refresh()
@@ -318,8 +351,15 @@ def main(stdscr):
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_WHITE, -1)
-    curses.init_pair(2, curses.COLOR_GREEN, -1) # Green for meters/messages
+    # Define color palette
+    curses.init_pair(1, curses.COLOR_WHITE, -1)   # Default
+    curses.init_pair(2, curses.COLOR_GREEN, -1)   # Success / Low Level
+    curses.init_pair(3, curses.COLOR_YELLOW, -1)  # Warning / Mid Level / Selection
+    curses.init_pair(4, curses.COLOR_RED, -1)     # Error / High Level
+    curses.init_pair(5, curses.COLOR_CYAN, -1)    # Headers
+    curses.init_pair(6, curses.COLOR_MAGENTA, -1) # Keys / Accents
+    curses.init_pair(7, curses.COLOR_BLUE, -1)    # Borders / Dim
+    
     stdscr.bkgd(' ', curses.color_pair(1))
     stdscr.nodelay(True)
     
